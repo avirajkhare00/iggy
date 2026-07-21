@@ -22,8 +22,7 @@
 //! hash through consensus.
 
 use crate::session_manager::SessionManager;
-use crate::wire::request_body;
-use bytes::Bytes;
+use crate::wire::{request_body, rewrite_request_body};
 use iggy_binary_protocol::requests::personal_access_tokens::{
     CreatePersonalAccessTokenRequest as WireCreatePersonalAccessTokenRequest,
     DeletePersonalAccessTokenRequest as WireDeletePersonalAccessTokenRequest,
@@ -43,18 +42,32 @@ pub(crate) fn maybe_rewrite_pat_request(
     transport_client_id: u128,
     request: Message<RequestHeader>,
 ) -> Result<(Message<RequestHeader>, Option<String>), IggyError> {
-    let operation = request.header().operation;
-    let user_id = match operation {
+    let user_id = match request.header().operation {
         Operation::CreatePersonalAccessToken | Operation::DeletePersonalAccessToken => sessions
             .borrow()
             .get_user_id(transport_client_id)
             .ok_or(IggyError::Unauthenticated)?,
         _ => return Ok((request, None)),
     };
+    rewrite_pat_request_for_user(user_id, request)
+}
 
+/// PAT rewrite for a caller that already holds the authenticated `user_id`.
+///
+/// The HTTP listener authenticates against its own session table rather than
+/// the transport `SessionManager`, so it resolves the id itself and calls this
+/// directly. `CreatePersonalAccessToken` mints the raw token + hash and hands
+/// the raw token back; `DeletePersonalAccessToken` is rewritten to the
+/// replicated form scoped to `user_id` (`only_if_expired` false); every other
+/// operation passes through unchanged with `None` (the HTTP write core routes
+/// all of its ops here, so the non-PAT arm is a no-op, not `unreachable`).
+pub(crate) fn rewrite_pat_request_for_user(
+    user_id: u32,
+    request: Message<RequestHeader>,
+) -> Result<(Message<RequestHeader>, Option<String>), IggyError> {
     let body = request_body(&request);
     let mut raw_token = None;
-    let rewritten = match operation {
+    let rewritten = match request.header().operation {
         Operation::CreatePersonalAccessToken => {
             let wire = WireCreatePersonalAccessTokenRequest::decode_from(body)
                 .map_err(|_| IggyError::InvalidCommand)?;
@@ -79,10 +92,13 @@ pub(crate) fn maybe_rewrite_pat_request(
             ReplicatedDeletePersonalAccessTokenRequest {
                 user_id,
                 name: wire.name,
+                // Client-initiated: delete by name unconditionally. Only the
+                // background cleaner sets the expiry gate.
+                only_if_expired: false,
             }
             .to_bytes()
         }
-        _ => unreachable!(),
+        _ => return Ok((request, None)),
     };
 
     Ok((rewrite_request_body(&request, &rewritten)?, raw_token))
@@ -101,28 +117,4 @@ fn mint_pat_raw_and_hash() -> (String, [u8; 64]) {
     let mut out = [0u8; 64];
     out.copy_from_slice(bytes);
     (raw, out)
-}
-
-fn rewrite_request_body(
-    request: &Message<RequestHeader>,
-    body: &Bytes,
-) -> Result<Message<RequestHeader>, IggyError> {
-    let total_size = std::mem::size_of::<RequestHeader>()
-        .checked_add(body.len())
-        .ok_or(IggyError::InvalidConfiguration)?;
-    let size = u32::try_from(total_size).map_err(|_| IggyError::InvalidConfiguration)?;
-    let mut rewritten = Message::<RequestHeader>::new(total_size);
-    let header = bytemuck::checked::try_from_bytes_mut::<RequestHeader>(
-        &mut rewritten.as_mut_slice()[..std::mem::size_of::<RequestHeader>()],
-    )
-    .expect("zeroed bytes are a valid request header");
-    *header = *request.header();
-    header.size = size;
-    rewritten.as_mut_slice()[std::mem::size_of::<RequestHeader>()..].copy_from_slice(body);
-    // TODO(vsr): the body changed but `request_checksum` / `checksum` /
-    // `checksum_body` were copied verbatim from the original header. Safe
-    // today because the SDK initializes `request_checksum` to 0 and the
-    // server does not validate it; the moment integrity checking lands,
-    // recompute these here (or zero them and re-sign in a follow-up step).
-    Ok(rewritten)
 }

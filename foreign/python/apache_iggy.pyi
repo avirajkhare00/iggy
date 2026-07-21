@@ -22,19 +22,27 @@ import asyncio
 import builtins
 import collections.abc
 import datetime
+import enum
 import typing
 
 __all__ = [
     "AutoCommit",
     "AutoCommitAfter",
     "AutoCommitWhen",
+    "ConsumerGroup",
+    "ConsumerGroupDetails",
+    "ConsumerGroupMember",
     "IggyClient",
     "IggyConsumer",
     "PollingStrategy",
     "ReceiveMessage",
     "SendMessage",
     "StreamDetails",
+    "Topic",
     "TopicDetails",
+    "UserInfo",
+    "UserInfoDetails",
+    "UserStatus",
 ]
 
 class AutoCommit:
@@ -231,6 +239,75 @@ class AutoCommitWhen:
     ...
 
 @typing.final
+class ConsumerGroup:
+    @property
+    def id(self) -> builtins.int:
+        r"""
+        Gets the unique identifier (numeric) of the consumer group.
+        """
+    @property
+    def name(self) -> builtins.str:
+        r"""
+        Gets the name of the consumer group.
+        """
+    @property
+    def partitions_count(self) -> builtins.int:
+        r"""
+        Gets the number of partitions the consumer group is consuming.
+        """
+    @property
+    def members_count(self) -> builtins.int:
+        r"""
+        Gets the number of members in the consumer group.
+        """
+
+@typing.final
+class ConsumerGroupDetails:
+    @property
+    def id(self) -> builtins.int:
+        r"""
+        Gets the unique identifier (numeric) of the consumer group.
+        """
+    @property
+    def name(self) -> builtins.str:
+        r"""
+        Gets the name of the consumer group.
+        """
+    @property
+    def partitions_count(self) -> builtins.int:
+        r"""
+        Gets the number of partitions the consumer group is consuming.
+        """
+    @property
+    def members_count(self) -> builtins.int:
+        r"""
+        Gets the number of members in the consumer group.
+        """
+    @property
+    def members(self) -> builtins.list[ConsumerGroupMember]:
+        r"""
+        Gets the collection of members in the consumer group.
+        """
+
+@typing.final
+class ConsumerGroupMember:
+    @property
+    def id(self) -> builtins.int:
+        r"""
+        Gets the unique identifier (numeric) of the consumer group member.
+        """
+    @property
+    def partitions_count(self) -> builtins.int:
+        r"""
+        Gets the number of partitions the consumer group member is consuming.
+        """
+    @property
+    def partitions(self) -> builtins.list[builtins.int]:
+        r"""
+        Gets the collection of partitions the consumer group member is consuming.
+        """
+
+@typing.final
 class IggyClient:
     r"""
     A Python class representing the Iggy client.
@@ -261,6 +338,92 @@ class IggyClient:
         r"""
         Logs in the user with the given credentials.
         Returns `Ok(())` on success, or a PyRuntimeError on failure.
+        """
+    def get_user(
+        self, user_id: builtins.str | builtins.int
+    ) -> collections.abc.Awaitable[UserInfoDetails | None]:
+        r"""
+        Get the info about a specific user by unique ID or username.
+
+        Args:
+            user_id: User identifier as `str | int`.
+
+        Returns:
+            An awaitable that resolves to `UserInfoDetails` if the user exists,
+            or `None` otherwise.
+
+        Raises:
+            PyValueError: If a string identifier is invalid.
+            PyRuntimeError: If the request fails.
+        """
+    def get_users(self) -> collections.abc.Awaitable[list[UserInfo]]:
+        r"""
+        Get the info about all the users.
+
+        Returns:
+            An awaitable that resolves to `list[UserInfo]`.
+
+        Raises:
+            PyRuntimeError: If the request fails.
+        """
+    def create_user(
+        self,
+        username: builtins.str,
+        password: builtins.str,
+        status: UserStatus | None = None,
+    ) -> collections.abc.Awaitable[UserInfoDetails]:
+        r"""
+        Create a new user.
+
+        The user is created without permissions.
+
+        Args:
+            username: Username as `str`.
+            password: Password as `str`.
+            status: User status as `UserStatus | None`; defaults to `UserStatus.Active`.
+
+        Returns:
+            An awaitable that resolves to the created `UserInfoDetails`.
+
+        Raises:
+            PyRuntimeError: If an argument is invalid or the request fails.
+        """
+    def update_user(
+        self,
+        user_id: builtins.str | builtins.int,
+        username: builtins.str | None = None,
+        status: UserStatus | None = None,
+    ) -> collections.abc.Awaitable[None]:
+        r"""
+        Update a user by unique ID or username.
+
+        Args:
+            user_id: User identifier as `str | int`.
+            username: New username as `str | None`; unchanged when `None`.
+            status: New status as `UserStatus | None`; unchanged when `None`.
+
+        Returns:
+            An awaitable that resolves to `None` when the user is updated.
+
+        Raises:
+            PyValueError: If a string identifier is invalid.
+            PyRuntimeError: If the request fails.
+        """
+    def delete_user(
+        self, user_id: builtins.str | builtins.int
+    ) -> collections.abc.Awaitable[None]:
+        r"""
+        Delete a user by unique ID or username.
+
+        Args:
+            user_id: User identifier as `str | int`.
+
+        Returns:
+            An awaitable that resolves to `None` when the user is deleted.
+
+        Raises:
+            PyValueError: If a string identifier is invalid.
+            PyRuntimeError: If the request fails.
         """
     def connect(self) -> collections.abc.Awaitable[None]:
         r"""
@@ -301,6 +464,221 @@ class IggyClient:
         r"""
         Gets topic by stream and id.
         Returns Option of topic details or a PyRuntimeError on failure.
+        """
+    def get_topics(
+        self, stream_id: builtins.str | builtins.int
+    ) -> collections.abc.Awaitable[list[Topic]]:
+        r"""
+        Get all topics in a stream.
+
+        Args:
+            stream_id: Stream identifier as `str | int`.
+
+        Returns:
+            An awaitable that resolves to `list[Topic]`.
+
+        Raises:
+            PyRuntimeError: If the identifier is invalid or the request fails.
+        """
+    def update_topic(
+        self,
+        stream_id: builtins.str | builtins.int,
+        topic_id: builtins.str | builtins.int,
+        name: builtins.str,
+        compression_algorithm: builtins.str | None = None,
+        replication_factor: builtins.int | None = None,
+        message_expiry: datetime.timedelta | None = None,
+        max_topic_size: builtins.int | None = None,
+    ) -> collections.abc.Awaitable[None]:
+        r"""
+        Update an existing topic.
+
+        This is a full replacement: any optional parameter left unset is reset to
+        its server default rather than preserved.
+
+        Args:
+            stream_id: Stream identifier as `str | int`.
+            topic_id: Topic identifier as `str | int`.
+            name: New topic name as `str`.
+            compression_algorithm: Compression algorithm as `str | None`.
+            replication_factor: Replication factor as `int | None`.
+            message_expiry: Message expiry as `datetime.timedelta | None`.
+            max_topic_size: Maximum topic size in bytes as `int | None`.
+
+        Returns:
+            An awaitable that resolves to `None` when the topic is updated.
+
+        Raises:
+            PyRuntimeError: If an argument is invalid or the request fails.
+        """
+    def delete_topic(
+        self,
+        stream_id: builtins.str | builtins.int,
+        topic_id: builtins.str | builtins.int,
+    ) -> collections.abc.Awaitable[None]:
+        r"""
+        Delete a topic from a stream.
+
+        Args:
+            stream_id: Stream identifier as `str | int`.
+            topic_id: Topic identifier as `str | int`.
+
+        Returns:
+            An awaitable that resolves to `None` when the topic is deleted.
+
+        Raises:
+            PyRuntimeError: If an identifier is invalid or the request fails.
+        """
+    def purge_topic(
+        self,
+        stream_id: builtins.str | builtins.int,
+        topic_id: builtins.str | builtins.int,
+    ) -> collections.abc.Awaitable[None]:
+        r"""
+        Purge all messages from a topic.
+
+        Args:
+            stream_id: Stream identifier as `str | int`.
+            topic_id: Topic identifier as `str | int`.
+
+        Returns:
+            An awaitable that resolves to `None` when the topic is purged.
+
+        Raises:
+            PyRuntimeError: If an identifier is invalid or the request fails.
+        """
+    def create_consumer_group(
+        self,
+        stream_id: builtins.str | builtins.int,
+        topic_id: builtins.str | builtins.int,
+        name: builtins.str,
+    ) -> collections.abc.Awaitable[None]:
+        r"""
+        Create a consumer group for a stream and topic.
+
+        Args:
+            stream_id: Stream identifier as `str | int`.
+            topic_id: Topic identifier as `str | int`.
+            name: Consumer group name as `str`.
+
+        Returns:
+            An awaitable that resolves to `None` when the consumer group is created.
+
+        Raises:
+            PyValueError: If an identifier is invalid.
+            PyRuntimeError: If the request fails.
+        """
+    def get_consumer_group(
+        self,
+        stream_id: builtins.str | builtins.int,
+        topic_id: builtins.str | builtins.int,
+        group_id: builtins.str | builtins.int,
+    ) -> collections.abc.Awaitable[ConsumerGroupDetails | None]:
+        r"""
+        Retrieve details for a consumer group from the specified stream and topic.
+
+        Args:
+            stream_id: Stream identifier as `str | int`.
+            topic_id: Topic identifier as `str | int`.
+            group_id: Consumer group identifier as `str | int`.
+
+        Returns:
+            An awaitable that resolves to `ConsumerGroupDetails` if the consumer group exists,
+            or `None` otherwise.
+
+        Raises:
+            PyValueError: If an identifier is invalid.
+            PyRuntimeError: If the request fails.
+        """
+    def get_consumer_groups(
+        self,
+        stream_id: builtins.str | builtins.int,
+        topic_id: builtins.str | builtins.int,
+    ) -> collections.abc.Awaitable[list[ConsumerGroup]]:
+        r"""
+        Get all consumer groups for the specified stream and topic.
+
+        Args:
+            stream_id: Stream identifier as `str | int`.
+            topic_id: Topic identifier as `str | int`.
+
+        Returns:
+            An awaitable that resolves to `list[ConsumerGroup]`.
+
+        Raises:
+            PyValueError: If an identifier is invalid.
+            PyRuntimeError: If the request fails.
+        """
+    def delete_consumer_group(
+        self,
+        stream_id: builtins.str | builtins.int,
+        topic_id: builtins.str | builtins.int,
+        group_id: builtins.str | builtins.int,
+    ) -> collections.abc.Awaitable[None]:
+        r"""
+        Delete a consumer group for a stream and topic.
+
+        Args:
+            stream_id: Stream identifier as `str | int`.
+            topic_id: Topic identifier as `str | int`.
+            group_id: Consumer group identifier as `str | int`.
+
+        Returns:
+            An awaitable that resolves to `None` when the consumer group is deleted.
+
+        Raises:
+            PyValueError: If a string identifier is invalid.
+            PyRuntimeError: If the request fails.
+        """
+    def join_consumer_group(
+        self,
+        stream_id: builtins.str | builtins.int,
+        topic_id: builtins.str | builtins.int,
+        group_id: builtins.str | builtins.int,
+    ) -> collections.abc.Awaitable[None]:
+        r"""
+        Join a consumer group for a stream and topic.
+
+        This method only registers the current client as a group member. To consume messages
+        as a group, use `consumer_group()`, which enables auto-join by default.
+
+        Args:
+            stream_id: Stream identifier as `str | int`.
+            topic_id: Topic identifier as `str | int`.
+            group_id: Consumer group identifier as `str | int`.
+
+        Returns:
+            An awaitable that resolves to `None` when the client joins the consumer group.
+
+        Raises:
+            PyValueError: If a string identifier is invalid.
+            PyRuntimeError: If the request fails, including `Feature is unavailable` on HTTP transport.
+        """
+    def leave_consumer_group(
+        self,
+        stream_id: builtins.str | builtins.int,
+        topic_id: builtins.str | builtins.int,
+        group_id: builtins.str | builtins.int,
+    ) -> collections.abc.Awaitable[None]:
+        r"""
+        Leave a consumer group for a stream and topic.
+
+        Args:
+            stream_id: Stream identifier as `str | int`.
+            topic_id: Topic identifier as `str | int`.
+            group_id: Consumer group identifier as `str | int`.
+
+        Returns:
+            An awaitable that resolves to `None` when the client leaves the consumer group.
+
+        Note:
+            Consumers created from this client for the same group share one server-side
+            membership. Leaving revokes that membership. Consumers with auto-join enabled
+            rejoin on their next poll.
+
+        Raises:
+            PyValueError: If a string identifier is invalid.
+            PyRuntimeError: If the request fails, including `Feature is unavailable` on HTTP transport.
         """
     def send_messages(
         self,
@@ -520,12 +898,118 @@ class StreamDetails:
     def topics_count(self) -> builtins.int: ...
 
 @typing.final
+class Topic:
+    @property
+    def id(self) -> builtins.int:
+        r"""
+        The unique identifier (numeric) of the topic.
+        """
+    @property
+    def name(self) -> builtins.str:
+        r"""
+        The unique name of the topic.
+        """
+    @property
+    def messages_count(self) -> builtins.int:
+        r"""
+        The total number of messages in the topic.
+        """
+    @property
+    def partitions_count(self) -> builtins.int:
+        r"""
+        The total number of partitions in the topic.
+        """
+
+@typing.final
 class TopicDetails:
     @property
-    def id(self) -> builtins.int: ...
+    def id(self) -> builtins.int:
+        r"""
+        The unique identifier (numeric) of the topic.
+        """
     @property
-    def name(self) -> builtins.str: ...
+    def name(self) -> builtins.str:
+        r"""
+        The unique name of the topic.
+        """
     @property
-    def messages_count(self) -> builtins.int: ...
+    def messages_count(self) -> builtins.int:
+        r"""
+        The total number of messages in the topic.
+        """
     @property
-    def partitions_count(self) -> builtins.int: ...
+    def partitions_count(self) -> builtins.int:
+        r"""
+        The total number of partitions in the topic.
+        """
+    @property
+    def compression_algorithm(self) -> builtins.str:
+        r"""
+        Compression algorithm for the topic.
+        """
+    @property
+    def replication_factor(self) -> builtins.int:
+        r"""
+        Replication factor for the topic.
+        """
+
+@typing.final
+class UserInfo:
+    @property
+    def id(self) -> builtins.int:
+        r"""
+        The unique identifier (numeric) of the user.
+        """
+    @property
+    def created_at(self) -> builtins.int:
+        r"""
+        The timestamp when the user was created, in microseconds since the Unix epoch.
+        """
+    @property
+    def status(self) -> UserStatus:
+        r"""
+        The status of the user.
+        """
+    @property
+    def username(self) -> builtins.str:
+        r"""
+        The username of the user.
+        """
+
+@typing.final
+class UserInfoDetails:
+    @property
+    def id(self) -> builtins.int:
+        r"""
+        The unique identifier (numeric) of the user.
+        """
+    @property
+    def created_at(self) -> builtins.int:
+        r"""
+        The timestamp when the user was created, in microseconds since the Unix epoch.
+        """
+    @property
+    def status(self) -> UserStatus:
+        r"""
+        The status of the user.
+        """
+    @property
+    def username(self) -> builtins.str:
+        r"""
+        The username of the user.
+        """
+
+@typing.final
+class UserStatus(enum.Enum):
+    r"""
+    The status of a user account.
+    """
+
+    Active = ...
+    r"""
+    The user account is active and can be used.
+    """
+    Inactive = ...
+    r"""
+    The user account is inactive and cannot be used.
+    """

@@ -16,10 +16,12 @@
 // under the License.
 
 pub mod authentication_scenario;
+#[cfg(not(feature = "vsr"))]
 pub mod bench_scenario;
 pub mod concurrent_produce_consume_scenario;
 pub mod concurrent_scenario;
 pub mod consumer_group_auto_commit_reconnection_scenario;
+pub mod consumer_group_duplicate_name_create_scenario;
 pub mod consumer_group_join_scenario;
 pub mod consumer_group_new_messages_after_restart_scenario;
 pub mod consumer_group_offset_cleanup_scenario;
@@ -27,6 +29,10 @@ pub mod consumer_group_with_multiple_clients_polling_messages_scenario;
 pub mod consumer_group_with_single_client_polling_messages_scenario;
 pub mod consumer_timestamp_polling_scenario;
 pub mod create_message_payload;
+// Cross-protocol PAT visibility (create via HTTP, list via TCP across shards,
+// and the reverse). Runs under vsr too: server-ng serves the PAT routes on its
+// shard-0 HTTP listener and the create/delete commit through the metadata STM,
+// so the token replicates to every shard a TCP client may land on.
 pub mod cross_protocol_pat_scenario;
 pub mod encryption_scenario;
 pub mod invalid_consumer_offset_scenario;
@@ -45,6 +51,8 @@ pub mod single_message_per_batch_scenario;
 pub mod snapshot_scenario;
 pub mod stale_client_consumer_group_scenario;
 pub mod stream_size_validation_scenario;
+#[cfg(feature = "vsr")]
+pub mod stress_produce_consume_scenario;
 pub mod system_scenario;
 pub mod tcp_tls_scenario;
 pub mod timestamp_scenario;
@@ -53,8 +61,12 @@ pub mod websocket_tls_scenario;
 
 use iggy::prelude::*;
 use integration::harness::{TestHarness, delete_user};
+use std::time::{Duration, Instant};
+use tokio::time::sleep;
 
 const PARTITION_ID: u32 = 0;
+const POLL_CONVERGENCE_TIMEOUT: Duration = Duration::from_secs(10);
+const POLL_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 const STREAM_NAME: &str = "test-stream";
 const TOPIC_NAME: &str = "test-topic";
 const PARTITIONS_COUNT: u32 = 3;
@@ -64,6 +76,43 @@ const USERNAME_2: &str = "user2";
 const USERNAME_3: &str = "user3";
 const CONSUMER_KIND: ConsumerKind = ConsumerKind::Consumer;
 const MESSAGES_COUNT: u32 = 1337;
+
+/// Poll until the partition serves `expected_count` messages or
+/// [`POLL_CONVERGENCE_TIMEOUT`] expires, returning the last poll result.
+///
+/// `send_messages` acks at consensus commit while the owning shard applies
+/// the batch asynchronously (see the materialisation race note at the top
+/// of `server-ng/src/partition_reconciler.rs`), so the first read after a
+/// send burst can observe fewer messages than were acked. Retrying absorbs
+/// that convergence window without weakening the caller's assertion: real
+/// message loss still returns short and fails it once the deadline expires.
+async fn poll_until_expected_count(
+    client: &IggyClient,
+    stream_name: &str,
+    topic_name: &str,
+    strategy: &PollingStrategy,
+    expected_count: u32,
+) -> PolledMessages {
+    let deadline = Instant::now() + POLL_CONVERGENCE_TIMEOUT;
+    loop {
+        let polled = client
+            .poll_messages(
+                &Identifier::named(stream_name).unwrap(),
+                &Identifier::named(topic_name).unwrap(),
+                Some(PARTITION_ID),
+                &Consumer::default(),
+                strategy,
+                expected_count,
+                false,
+            )
+            .await
+            .unwrap();
+        if polled.messages.len() as u32 == expected_count || Instant::now() >= deadline {
+            return polled;
+        }
+        sleep(POLL_RETRY_INTERVAL).await;
+    }
+}
 
 async fn create_client(harness: &TestHarness) -> IggyClient {
     harness

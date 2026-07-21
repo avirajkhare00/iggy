@@ -15,11 +15,12 @@
 // specific language governing permissions and limitations
 // under the License.
 
+#[cfg(not(feature = "vsr"))]
+use crate::server::scenarios::bench_scenario;
 use crate::server::scenarios::{
-    authentication_scenario, bench_scenario, consumer_timestamp_polling_scenario,
-    create_message_payload, invalid_consumer_offset_scenario, message_headers_scenario,
-    permissions_scenario, snapshot_scenario, stream_size_validation_scenario, system_scenario,
-    user_scenario,
+    authentication_scenario, consumer_timestamp_polling_scenario, create_message_payload,
+    invalid_consumer_offset_scenario, message_headers_scenario, permissions_scenario,
+    snapshot_scenario, stream_size_validation_scenario, system_scenario, user_scenario,
 };
 use integration::iggy_harness;
 
@@ -115,6 +116,10 @@ async fn stream_size_validation(harness: &TestHarness) {
     stream_size_validation_scenario::run(harness).await;
 }
 
+// Blocked under vsr: pushes 8 MiB through the data plane, which drains the
+// in-memory partition journal to disk segments; benchmarks are out of
+// scope for the vsr test pass.
+#[cfg(not(feature = "vsr"))]
 #[iggy_harness(
     test_client_transport = [Tcp, Http, Quic, WebSocket],
     server(
@@ -154,6 +159,10 @@ async fn snapshot(harness: &TestHarness) {
     snapshot_scenario::run(harness).await;
 }
 
+// Under vsr the partition plane validates the stored offset at admission and
+// replies with a terminal, result-framed `InvalidOffset` (see
+// `store_consumer_offset` handling in `iggy_partition::on_request`). HTTP is
+// auto-dropped by the harness macro, so this runs over [Tcp, Quic, WebSocket].
 #[iggy_harness(
     test_client_transport = [Tcp, Http, Quic, WebSocket],
     server(

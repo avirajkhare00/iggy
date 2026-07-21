@@ -22,14 +22,19 @@ mod receive_message;
 mod send_message;
 mod stream;
 mod topic;
+mod user;
 
 use client::IggyClient;
-use consumer::{AutoCommit, AutoCommitAfter, AutoCommitWhen, IggyConsumer, ReceiveMessageIterator};
+use consumer::{
+    AutoCommit, AutoCommitAfter, AutoCommitWhen, ConsumerGroup, ConsumerGroupDetails,
+    ConsumerGroupMember, IggyConsumer, ReceiveMessageIterator,
+};
 use pyo3::prelude::*;
 use receive_message::{PollingStrategy, ReceiveMessage};
 use send_message::SendMessage;
 use stream::StreamDetails;
-use topic::TopicDetails;
+use topic::{Topic, TopicDetails};
+use user::{UserInfo, UserInfoDetails, UserStatus};
 
 /// A Python module implemented in Rust.
 #[pymodule]
@@ -38,12 +43,19 @@ fn apache_iggy(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ReceiveMessage>()?;
     m.add_class::<IggyClient>()?;
     m.add_class::<StreamDetails>()?;
+    m.add_class::<Topic>()?;
     m.add_class::<TopicDetails>()?;
+    m.add_class::<ConsumerGroup>()?;
+    m.add_class::<ConsumerGroupDetails>()?;
+    m.add_class::<ConsumerGroupMember>()?;
     m.add_class::<PollingStrategy>()?;
     m.add_class::<IggyConsumer>()?;
     m.add_class::<AutoCommit>()?;
     m.add_class::<AutoCommitAfter>()?;
     m.add_class::<AutoCommitWhen>()?;
     m.add_class::<ReceiveMessageIterator>()?;
+    m.add_class::<UserStatus>()?;
+    m.add_class::<UserInfo>()?;
+    m.add_class::<UserInfoDetails>()?;
     Ok(())
 }

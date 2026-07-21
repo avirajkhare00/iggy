@@ -20,7 +20,7 @@ use crate::iobuf::Owned;
 use crate::sharding::IggyNamespace;
 use bytes::{Bytes, BytesMut};
 use iggy_binary_protocol::{PrepareHeader, RequestHeader};
-use iggy_common::{INDEX_SIZE, IggyError, random_id};
+use iggy_common::{EncryptorKind, INDEX_SIZE, IggyError, random_id};
 use std::hash::Hasher;
 use twox_hash::XxHash3_64;
 
@@ -173,12 +173,12 @@ impl SendMessages2Owned {
             header[32..36].copy_from_slice(&user_headers_length.to_le_bytes());
             header[36..40].copy_from_slice(&payload_length.to_le_bytes());
 
-            let checksum = calculate_checksum_parts(&header[8..], user_headers, &message.payload);
+            let checksum = calculate_checksum_parts(&header[8..], &message.payload, user_headers);
             header[0..8].copy_from_slice(&checksum.to_le_bytes());
 
             blob.extend_from_slice(&header);
-            blob.extend_from_slice(user_headers);
             blob.extend_from_slice(&message.payload);
+            blob.extend_from_slice(user_headers);
         }
 
         let blob = blob.freeze();
@@ -245,12 +245,12 @@ impl SendMessages2Owned {
             header[36..40].copy_from_slice(&payload_length.to_le_bytes());
 
             let checksum =
-                calculate_checksum_parts(&header[8..], legacy.user_headers, legacy.payload);
+                calculate_checksum_parts(&header[8..], legacy.payload, legacy.user_headers);
             header[0..8].copy_from_slice(&checksum.to_le_bytes());
 
             blob.extend_from_slice(&header);
-            blob.extend_from_slice(legacy.user_headers);
             blob.extend_from_slice(legacy.payload);
+            blob.extend_from_slice(legacy.user_headers);
         }
 
         let blob = blob.freeze();
@@ -268,9 +268,13 @@ impl SendMessages2Owned {
 
     pub fn encode_request(
         self,
-        request_header: RequestHeader,
+        mut request_header: RequestHeader,
     ) -> Result<Message<RequestHeader>, IggyError> {
         let total_size = std::mem::size_of::<RequestHeader>() + self.header.total_size();
+        // The converted body differs in size from the legacy wire body the
+        // header described; a stale `size` truncates the rebuilt blob for
+        // every downstream slice (stamping, journal reads).
+        request_header.size = u32::try_from(total_size).map_err(|_| IggyError::InvalidCommand)?;
         let mut buffer = Owned::<MESSAGE_ALIGN>::zeroed(total_size);
         let bytes = buffer.as_mut_slice();
         bytes[0..std::mem::size_of::<RequestHeader>()]
@@ -457,26 +461,6 @@ pub struct SendMessages2MessageView<'a> {
 }
 
 #[allow(dead_code)]
-impl SendMessages2MessageView<'_> {
-    pub fn owned_message(&self, batch: &SendMessages2Header) -> IggyMessage2 {
-        IggyMessage2 {
-            header: IggyMessage2Header {
-                checksum: self.header.checksum,
-                id: self.header.id,
-                offset: batch.base_offset + u64::from(self.header.offset_delta),
-                timestamp: batch.base_timestamp,
-                origin_timestamp: batch.origin_timestamp + u64::from(self.header.timestamp_delta),
-                user_headers_length: self.header.user_headers_length,
-                payload_length: self.header.payload_length,
-            },
-            payload: Bytes::copy_from_slice(self.payload),
-            user_headers: (!self.user_headers.is_empty())
-                .then(|| Bytes::copy_from_slice(self.user_headers)),
-        }
-    }
-}
-
-#[allow(dead_code)]
 pub struct SendMessages2Iterator<'a> {
     blob: &'a [u8],
     position: usize,
@@ -492,10 +476,10 @@ impl<'a> Iterator for SendMessages2Iterator<'a> {
 
         let header = SendMessages2MessageHeader::decode(&self.blob[self.position..]).ok()?;
         let start = self.position + MESSAGE_HEADER_SIZE;
-        let headers_end = start + header.user_headers_length as usize;
-        let payload_end = headers_end + header.payload_length as usize;
-        let user_headers = self.blob.get(start..headers_end)?;
-        let payload = self.blob.get(headers_end..payload_end)?;
+        let payload_end = start + header.payload_length as usize;
+        let headers_end = payload_end + header.user_headers_length as usize;
+        let payload = self.blob.get(start..payload_end)?;
+        let user_headers = self.blob.get(payload_end..headers_end)?;
         self.position += header.total_size();
         Some(SendMessages2MessageView {
             header,
@@ -528,10 +512,10 @@ impl<'a> Iterator for SendMessages2IteratorWithOffsets<'a> {
         let start = self.position;
         let header = SendMessages2MessageHeader::decode(&self.blob[self.position..]).ok()?;
         let message_start = self.position + MESSAGE_HEADER_SIZE;
-        let headers_end = message_start + header.user_headers_length as usize;
-        let payload_end = headers_end + header.payload_length as usize;
-        let user_headers = self.blob.get(message_start..headers_end)?;
-        let payload = self.blob.get(headers_end..payload_end)?;
+        let payload_end = message_start + header.payload_length as usize;
+        let headers_end = payload_end + header.user_headers_length as usize;
+        let payload = self.blob.get(message_start..payload_end)?;
+        let user_headers = self.blob.get(payload_end..headers_end)?;
         self.position += header.total_size();
         Some(SendMessages2MessageViewWithOffsets {
             message: SendMessages2MessageView {
@@ -547,6 +531,65 @@ impl<'a> Iterator for SendMessages2IteratorWithOffsets<'a> {
 
 pub(crate) type FrozenBatchHeader = crate::iobuf::Frozen<MESSAGE_ALIGN>;
 
+/// Re-encode a canonical `SendMessages2` request with every message's payload
+/// and user headers encrypted, per-message checksums and lengths recomputed,
+/// and the batch header (length + checksum) restamped.
+///
+/// Runs ONCE, on the primary at ingestion (after [`convert_request_message`]
+/// canonicalized the wire form), so the ciphertext is what replicates: every
+/// replica journals and persists identical bytes, and the poll path decrypts
+/// uniformly regardless of which replica or tier served the fragment.
+///
+/// # Errors
+///
+/// [`IggyError::InvalidCommand`] on an undecodable batch; encryption errors
+/// propagate from the encryptor.
+pub fn encrypt_batch_request(
+    message: Message<RequestHeader>,
+    encryptor: &EncryptorKind,
+) -> Result<Message<RequestHeader>, IggyError> {
+    let request_header = *message.header();
+    let total_size = request_header.size as usize;
+    let body = &message.as_slice()[std::mem::size_of::<RequestHeader>()..total_size];
+    let batch = decode_batch_slice(body)?;
+
+    let mut blob = BytesMut::with_capacity(batch.blob().len() * 2);
+    for view in batch.iter() {
+        let encrypted_payload = encryptor.encrypt(view.payload)?;
+        let encrypted_user_headers = if view.user_headers.is_empty() {
+            None
+        } else {
+            Some(encryptor.encrypt(view.user_headers)?)
+        };
+        let user_headers: &[u8] = encrypted_user_headers.as_deref().unwrap_or_default();
+        let payload_length =
+            u32::try_from(encrypted_payload.len()).map_err(|_| IggyError::InvalidCommand)?;
+        let user_headers_length =
+            u32::try_from(user_headers.len()).map_err(|_| IggyError::InvalidCommand)?;
+
+        let mut header = [0u8; MESSAGE_HEADER_SIZE];
+        header[8..24].copy_from_slice(&view.header.id.to_le_bytes());
+        header[24..28].copy_from_slice(&view.header.offset_delta.to_le_bytes());
+        header[28..32].copy_from_slice(&view.header.timestamp_delta.to_le_bytes());
+        header[32..36].copy_from_slice(&user_headers_length.to_le_bytes());
+        header[36..40].copy_from_slice(&payload_length.to_le_bytes());
+        let checksum = calculate_checksum_parts(&header[8..], &encrypted_payload, user_headers);
+        header[0..8].copy_from_slice(&checksum.to_le_bytes());
+
+        blob.extend_from_slice(&header);
+        blob.extend_from_slice(&encrypted_payload);
+        blob.extend_from_slice(user_headers);
+    }
+
+    let blob = blob.freeze();
+    let mut header = batch.header;
+    header.batch_length =
+        u64::try_from(COMMAND_HEADER_SIZE + blob.len()).map_err(|_| IggyError::InvalidCommand)?;
+    header.batch_checksum = calculate_batch_checksum(&header, &blob);
+
+    SendMessages2Owned { header, blob }.encode_request(request_header)
+}
+
 pub fn convert_request_message(
     namespace: IggyNamespace,
     message: Message<RequestHeader>,
@@ -554,13 +597,16 @@ pub fn convert_request_message(
     let request_header = *message.header();
     let total_size = request_header.size as usize;
     let body = &message.as_slice()[std::mem::size_of::<RequestHeader>()..total_size];
-    if decode_request_slice(body).is_ok() {
+    if decode_batch_slice(body).is_ok() {
         return Ok(message);
     }
     SendMessages2Owned::from_legacy_request(namespace, body)?.encode_request(request_header)
 }
 
-fn decode_request_slice(body: &[u8]) -> Result<SendMessages2Ref<'_>, IggyError> {
+/// Decode one batch slice (`[256B command header][blob]`), validating the
+/// batch checksum. The persisted segment-file record and the request slice
+/// share this layout, so both decode through here.
+pub fn decode_batch_slice(body: &[u8]) -> Result<SendMessages2Ref<'_>, IggyError> {
     if body.len() < COMMAND_HEADER_SIZE {
         return Err(IggyError::InvalidCommand);
     }
@@ -732,11 +778,13 @@ impl<'a> LegacyMessageRef<'a> {
     }
 }
 
-fn calculate_checksum_parts(header_tail: &[u8], user_headers: &[u8], payload: &[u8]) -> u64 {
+// Hash in storage order: header tail, payload, user headers (the message
+// sections follow the legacy wire layout).
+fn calculate_checksum_parts(header_tail: &[u8], payload: &[u8], user_headers: &[u8]) -> u64 {
     let mut hasher = XxHash3_64::new();
     hasher.write(header_tail);
-    hasher.write(user_headers);
     hasher.write(payload);
+    hasher.write(user_headers);
     hasher.finish()
 }
 
