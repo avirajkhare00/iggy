@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements.  See the NOTICE file
 # distributed with this work for additional information
@@ -17,6 +17,9 @@
 # under the License.
 
 set -euo pipefail
+
+# shellcheck source-path=SCRIPTDIR
+source "$(dirname "${BASH_SOURCE[0]}")/lib/init.sh"
 
 # Colors for output
 RED='\033[0;31m'
@@ -79,7 +82,7 @@ fi
 # Strip trailing ".0" -> e.g., 1.89.0 -> 1.89 (no change if it doesn't end in .0)
 RUST_VERSION_SHORT=$(echo "$RUST_VERSION" | sed -E 's/^([0-9]+)\.([0-9]+)\.0$/\1.\2/')
 RUST_IMAGE_VARIANT="slim-trixie"
-RUST_IMAGE_PATTERN="FROM[[:space:]].*\\brust:"
+RUST_IMAGE_PATTERN="FROM[[:space:]]+(.*[^[:alnum:]_])?rust:"
 RUST_IMAGE_TAG_PATTERN="(rust:[^-[:space:]]+)"
 
 echo "Rust version from rust-toolchain.toml: ${GREEN}$RUST_VERSION${NC} (using ${GREEN}$RUST_VERSION_SHORT${NC} for Dockerfiles)"
@@ -108,9 +111,9 @@ for dockerfile in $DOCKERFILES; do
         SOURCE="arg"
         CURRENT_VERSION=$(grep "^ARG RUST_VERSION=" "$dockerfile" | head -1 | sed 's/^ARG RUST_VERSION=//')
         EXPECTED_VERSION="$RUST_VERSION_SHORT"
-    elif grep -qE "FROM[[:space:]].*\brust:[0-9]" "$dockerfile" 2>/dev/null; then
+    elif grep -qE "${RUST_IMAGE_PATTERN}[0-9]" "$dockerfile" 2>/dev/null; then
         SOURCE="from"
-        CURRENT_VERSION=$(grep -E "FROM[[:space:]].*\brust:[0-9]" "$dockerfile" | head -1 | sed -nE 's/.*\brust:([0-9]+\.[0-9]+(\.[0-9]+)?).*/\1/p')
+        CURRENT_VERSION=$(grep -E "${RUST_IMAGE_PATTERN}[0-9]" "$dockerfile" | head -1 | sed -nE 's/.*rust:([0-9]+\.[0-9]+(\.[0-9]+)?).*/\1/p')
         # Preserve the file's precision: full patch (1.96.0) or short (1.96).
         if [[ "$CURRENT_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             EXPECTED_VERSION="$RUST_VERSION"
@@ -156,13 +159,17 @@ for dockerfile in $DOCKERFILES; do
     elif [ "$MODE" = "fix" ]; then
         if { [ -n "$SOURCE" ] && [ "$CURRENT_VERSION" != "$EXPECTED_VERSION" ]; } || [ "$RUST_IMAGE_MISMATCH" = "true" ]; then
             if [ -n "$SOURCE" ] && [ "$CURRENT_VERSION" != "$EXPECTED_VERSION" ] && [ "$SOURCE" = "arg" ]; then
-                sed -i "s/^ARG RUST_VERSION=.*/ARG RUST_VERSION=$EXPECTED_VERSION/" "$dockerfile"
+                sed -i.bak "s/^ARG RUST_VERSION=.*/ARG RUST_VERSION=$EXPECTED_VERSION/" "$dockerfile"
+                rm -f "$dockerfile.bak"
             elif [ -n "$SOURCE" ] && [ "$CURRENT_VERSION" != "$EXPECTED_VERSION" ]; then
-                sed -i -E "/FROM[[:space:]].*\\brust:[0-9]/ s#(\\brust:)[0-9]+\\.[0-9]+(\\.[0-9]+)?#\\1$EXPECTED_VERSION#g" "$dockerfile"
+                sed -i.bak -E "/${RUST_IMAGE_PATTERN}[0-9]/ s#(rust:)[0-9]+\\.[0-9]+(\\.[0-9]+)?#\\1$EXPECTED_VERSION#g" "$dockerfile"
+                rm -f "$dockerfile.bak"
             fi
             if [ "$RUST_IMAGE_MISMATCH" = "true" ]; then
-                sed -i -E "/$RUST_IMAGE_PATTERN/ s#$RUST_IMAGE_TAG_PATTERN-[^[:space:]]+#\\1-$RUST_IMAGE_VARIANT#g" "$dockerfile"
-                sed -i -E "/$RUST_IMAGE_PATTERN/ { /-$RUST_IMAGE_VARIANT([[:space:]]|$)/! s#$RUST_IMAGE_TAG_PATTERN([[:space:]]|$)#\\1-$RUST_IMAGE_VARIANT\\2#g; }" "$dockerfile"
+                sed -i.bak -E "/$RUST_IMAGE_PATTERN/ s#$RUST_IMAGE_TAG_PATTERN-[^[:space:]]+#\\1-$RUST_IMAGE_VARIANT#g" "$dockerfile"
+                rm -f "$dockerfile.bak"
+                sed -i.bak -E "/$RUST_IMAGE_PATTERN/ { /-$RUST_IMAGE_VARIANT([[:space:]]|$)/! s#$RUST_IMAGE_TAG_PATTERN([[:space:]]|$)#\\1-$RUST_IMAGE_VARIANT\\2#g; }" "$dockerfile"
+                rm -f "$dockerfile.bak"
             fi
             FIXED_FILES=$((FIXED_FILES + 1))
             MESSAGE=""
@@ -182,15 +189,61 @@ for dockerfile in $DOCKERFILES; do
     fi
 done
 
+# ── devcontainer.json ──────────────────────────────────────────────
+#
+# devcontainer.json's `build.args` key is passed by VS Code as
+# `docker build --build-arg` and overrides the default value of
+# `ARG RUST_VERSION=1.96` in `.devcontainer/Dockerfile`.  When the key
+# is absent the Dockerfile's ARG default wins and no sync is needed.
+# When present it must match rust-toolchain.toml, otherwise the
+# devcontainer image can silently drift from the pinned toolchain.
+DEVCONTAINER_JSON=".devcontainer/devcontainer.json"
+
+check_devcontainer_json() {
+    if [ ! -f "$DEVCONTAINER_JSON" ]; then
+        return 0
+    fi
+
+    local current_version
+    current_version=$(jq -r '(.build.args.RUST_VERSION // .build.args.rust_version // "")' "$DEVCONTAINER_JSON" 2>/dev/null || true)
+    if [ -z "$current_version" ] || [ "$current_version" = "null" ]; then
+        return 0
+    fi
+
+    TOTAL_FILES=$((TOTAL_FILES + 1))
+
+    if [ "$MODE" = "check" ]; then
+        if [ "$current_version" != "$RUST_VERSION_SHORT" ]; then
+            MISALIGNED_FILES+=("$DEVCONTAINER_JSON")
+            echo -e "${RED}✗${NC} $DEVCONTAINER_JSON: build.args.RUST_VERSION ${RED}$current_version${NC} (expected: ${GREEN}$RUST_VERSION_SHORT${NC})"
+        else
+            echo -e "${GREEN}✓${NC} $DEVCONTAINER_JSON: build.args.RUST_VERSION ${GREEN}$RUST_VERSION_SHORT${NC}"
+        fi
+    elif [ "$MODE" = "fix" ]; then
+        if [ "$current_version" != "$RUST_VERSION_SHORT" ]; then
+            local tmp_file
+            tmp_file=$(mktemp)
+            jq --arg v "$RUST_VERSION_SHORT" '.build.args.RUST_VERSION = $v' "$DEVCONTAINER_JSON" > "$tmp_file"
+            mv "$tmp_file" "$DEVCONTAINER_JSON"
+            FIXED_FILES=$((FIXED_FILES + 1))
+            echo -e "${GREEN}Fixed${NC} $DEVCONTAINER_JSON: build.args.RUST_VERSION ${RED}$current_version${NC} -> ${GREEN}$RUST_VERSION_SHORT${NC}"
+        else
+            echo -e "${GREEN}✓${NC} $DEVCONTAINER_JSON: build.args.RUST_VERSION already correct (${GREEN}$RUST_VERSION_SHORT${NC})"
+        fi
+    fi
+}
+
+check_devcontainer_json
+
 echo ""
 echo "────────────────────────────────────────────────"
 
 if [ "$MODE" = "check" ]; then
     if [ ${#MISALIGNED_FILES[@]} -eq 0 ]; then
-        echo -e "${GREEN}✓ All $TOTAL_FILES Dockerfiles are aligned with Rust version $RUST_VERSION_SHORT${NC}"
+        echo -e "${GREEN}✓ All $TOTAL_FILES files are aligned with Rust version $RUST_VERSION_SHORT${NC}"
         exit 0
     else
-        echo -e "${RED}✗ Found ${#MISALIGNED_FILES[@]} misaligned Dockerfile(s) out of $TOTAL_FILES:${NC}"
+        echo -e "${RED}✗ Found ${#MISALIGNED_FILES[@]} misaligned file(s) out of $TOTAL_FILES:${NC}"
         for file in "${MISALIGNED_FILES[@]}"; do
             echo -e "  ${RED}• $file${NC}"
         done
@@ -200,9 +253,9 @@ if [ "$MODE" = "check" ]; then
     fi
 elif [ "$MODE" = "fix" ]; then
     if [ $FIXED_FILES -eq 0 ]; then
-        echo -e "${GREEN}✓ All $TOTAL_FILES Dockerfiles were already aligned with Rust version $RUST_VERSION_SHORT${NC}"
+        echo -e "${GREEN}✓ All $TOTAL_FILES files were already aligned with Rust version $RUST_VERSION_SHORT${NC}"
     else
-        echo -e "${GREEN}✓ Fixed $FIXED_FILES out of $TOTAL_FILES Dockerfiles to use Rust version $RUST_VERSION_SHORT${NC}"
+        echo -e "${GREEN}✓ Fixed $FIXED_FILES out of $TOTAL_FILES files to use Rust version $RUST_VERSION_SHORT${NC}"
     fi
     exit 0
 fi

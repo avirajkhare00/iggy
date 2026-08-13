@@ -230,7 +230,6 @@ updates:
     directories:
       - "/"
       - "/core/server"
-      - "/core/server-ng"
       - "/core/connectors/runtime"
       - "/core/ai/mcp"
       - "/core/bench/dashboard/server"
@@ -284,7 +283,6 @@ updates:
   - package-ecosystem: "bazel"
     directories:
       - "/foreign/cpp"
-      - "/bdd/cpp"
     schedule:
       interval: "weekly"
       day: "thursday"

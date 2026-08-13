@@ -27,7 +27,7 @@
 # or stability of the code, it does indicate that the project has yet to be
 # fully endorsed by the ASF.
 
-ARG RUST_VERSION=1.96
+ARG RUST_VERSION=1.97.1
 FROM rust:${RUST_VERSION}-slim-trixie AS builder
 
 WORKDIR /build
@@ -43,7 +43,7 @@ RUN apt-get update && apt-get install -y \
 COPY . .
 RUN npm --prefix web ci && npm --prefix web run build:static
 RUN cargo build --bin iggy --release
-RUN cargo build --bin iggy-server --release
+RUN cargo build --bin iggy-server -p server --release
 
 FROM debian:trixie-slim
 RUN apt-get update && apt-get install -y \
@@ -51,7 +51,6 @@ RUN apt-get update && apt-get install -y \
     liblzma5 \
     libhwloc15 \
     && rm -rf /var/lib/apt/lists/*
-COPY ./core/configs ./configs
 COPY --from=builder /build/target/release/iggy .
 COPY --from=builder /build/target/release/iggy-server .
 

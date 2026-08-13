@@ -30,30 +30,18 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, fmt};
 
-// Drives the `iggy` CLI binary against a running server, in both legacy and
-// vsr/server-ng modes. Under vsr, single-node and the default 3-node cluster
-// both pass. A few cases are mode-split where server-ng diverges from legacy by
-// design: flush returns FeatureUnavailable, the session-timeout message
-// differs, and purge is eventually consistent so server state is polled.
+// Drives the `iggy` CLI binary against a running server. Single-node and the
+// default 3-node cluster both pass.
 mod cli;
-// A single `#[ignore]`d multi-node ping matrix stub; none of its cells run in
-// either mode today.
-#[cfg(not(feature = "vsr"))]
+// Raw-wire spec tests for VSR session continuity across a node restart
+// (IGGY-137).
 mod cluster;
 mod config_provider;
 mod connectors;
-// Runs under vsr; the one gap (`verify_after_server_restart`) is gated inside
-// the module: its rejoin window exceeds journal retention (state transfer).
 mod data_integrity;
 mod mcp;
 mod sdk;
 mod server;
-// Unit-tests the legacy `server` crate's state-file machinery directly
-// (`server::state::file::FileState` etc.). server-ng replaces that layer with
-// the metadata WAL, so this suite is legacy-only by construction, not a gap.
-#[cfg(not(feature = "vsr"))]
-mod state;
-mod storage;
 
 lazy_static! {
     static ref TESTS_FAILED: AtomicBool = AtomicBool::new(false);
@@ -164,7 +152,7 @@ fn write_to_log_file(test_name: &str, buf: &[u8]) {
 fn teardown() {
     // Flush and close all log file handles
     if let Ok(mut files) = LOG_FILES.lock() {
-        for (_, file) in files.iter_mut() {
+        for file in files.values_mut() {
             let _ = file.flush();
         }
         files.clear();
